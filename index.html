@@ -220,12 +220,17 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 
 <script type="text/babel">
 const { useState, useEffect, useRef, useCallback } = React;
 
+const SUPABASE_URL = "https://lmahwslpjqbbehsghmdc.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxtYWh3c2xwanFiYmVoc2dobWRjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEzMjg5ODksImV4cCI6MjA5NjkwNDk4OX0.M8UOBcaAJBUgzV6eKxTYTDvOeV39NRlReirNZ4DFtLA";
+const ROW_ID = "main";
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 const PALETTE = ["#E8633A","#2F8F6F","#3B6FA8","#9C5BC4","#C98A2B","#D14D74","#4F9B9B","#7A8B3F"];
-const KEY = "planner-data-v1";
 
 function uid() { return Math.random().toString(36).slice(2,9); }
 function dateKey(y,m,d){ return `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`; }
@@ -263,15 +268,40 @@ function App(){
 
   const load = useCallback(async () => {
     try {
-      const res = await window.storage.get(KEY, true);
-      setData(res ? JSON.parse(res.value) : emptyData());
+      const { data: row, error } = await supabaseClient
+        .from("planner_data")
+        .select("value")
+        .eq("id", ROW_ID)
+        .maybeSingle();
+      if (error) throw error;
+      if (row && row.value) {
+        setData(row.value);
+      } else {
+        const fresh = emptyData();
+        await supabaseClient.from("planner_data").insert({ id: ROW_ID, value: fresh });
+        setData(fresh);
+      }
     } catch (e) {
+      console.error(e);
+      setSaveState("불러오기 실패 — Supabase 설정을 확인해 주세요");
       setData(emptyData());
     }
     setLoading(false);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+    const channel = supabaseClient
+      .channel("planner_data_changes")
+      .on("postgres_changes", { event: "*", schema: "public", table: "planner_data", filter: `id=eq.${ROW_ID}` },
+        (payload) => {
+          if (payload.new && payload.new.value) {
+            setData(payload.new.value);
+          }
+        })
+      .subscribe();
+    return () => { supabaseClient.removeChannel(channel); };
+  }, [load]);
 
   const persist = useCallback((next) => {
     setData(next);
@@ -279,9 +309,14 @@ function App(){
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
       try {
-        await window.storage.set(KEY, JSON.stringify(next), true);
+        const { error } = await supabaseClient
+          .from("planner_data")
+          .update({ value: next, updated_at: new Date().toISOString() })
+          .eq("id", ROW_ID);
+        if (error) throw error;
         setSaveState("모두에게 저장됨");
       } catch (e) {
+        console.error(e);
         setSaveState("저장 실패 — 다시 시도해 주세요");
       }
     }, 250);
